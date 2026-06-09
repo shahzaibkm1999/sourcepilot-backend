@@ -78,6 +78,38 @@ const GetLineageInput = z.object({
   projectId: z.string().uuid().describe('The project UUID.'),
 });
 
+const GenerateDiscoveryInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID (must already have an intake).'),
+});
+
+const GenerateClarificationsInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+
+const SaveClarificationsInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+  questions: z
+    .array(
+      z.object({
+        id: z.string(),
+        area: z.string(),
+        question: z.string(),
+        answer: z.string().optional().nullable(),
+        status: z.enum(['pending', 'answered']).default('pending'),
+      }),
+    )
+    .describe('Updated questions (mutated in place with answers).'),
+  refinedInput: z.string().optional().describe('Optional refined requirement.'),
+});
+
+const GetDiscoveryInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+
+const ListClarificationsInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+
 // ---- Tool definitions for the MCP client ----
 const TOOLS = [
   {
@@ -198,6 +230,80 @@ const TOOLS = [
       required: ['projectId'],
     },
   },
+  {
+    name: 'generate_discovery',
+    description:
+      'SourcePilot: generate a discovery analysis (ambiguities, missing info, risks, assumptions) from the project intake. Returns the discovery row and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID (must already have an intake).' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'get_discovery',
+    description: 'SourcePilot: get the latest discovery row for a project.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID.' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'generate_clarifications',
+    description:
+      'SourcePilot: ask DeepSeek for the next batch of clarification questions the client should answer. Returns the new clarification row (questions start as "pending") and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID.' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'save_clarifications',
+    description:
+      'SourcePilot: save answers to a previously generated clarification batch. Creates a new versioned row that supersedes the previous one. Returns the new clarification row and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID.' },
+        questions: {
+          type: 'array',
+          description: 'Updated questions (with answers and status).',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              area: { type: 'string' },
+              question: { type: 'string' },
+              answer: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'answered'] },
+            },
+            required: ['id', 'area', 'question'],
+          },
+        },
+        refinedInput: { type: 'string', description: 'Optional refined requirement.' },
+      },
+      required: ['projectId', 'questions'],
+    },
+  },
+  {
+    name: 'list_clarifications',
+    description: 'SourcePilot: list every clarification iteration for a project (newest first).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID.' },
+      },
+      required: ['projectId'],
+    },
+  },
 ] as const;
 
 // ---- The server itself ----
@@ -282,6 +388,43 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { projectId } = GetLineageInput.parse(args);
         const lineage = await new ProjectOrchestrator().getLineage(projectId);
         return textResult(JSON.stringify({ projectId, lineage }, null, 2));
+      }
+
+      case 'generate_discovery': {
+        const { projectId } = GenerateDiscoveryInput.parse(args);
+        const result = await new ProjectOrchestrator().generateDiscovery(projectId);
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'get_discovery': {
+        const { projectId } = GetDiscoveryInput.parse(args);
+        const discovery = await new ProjectOrchestrator().getLatestDiscovery(projectId);
+        if (!discovery) {
+          return textResult(`No discovery for project ${projectId}.`);
+        }
+        return textResult(JSON.stringify(discovery, null, 2));
+      }
+
+      case 'generate_clarifications': {
+        const { projectId } = GenerateClarificationsInput.parse(args);
+        const result = await new ProjectOrchestrator().generateClarifications(projectId);
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'save_clarifications': {
+        const { projectId, questions, refinedInput } = SaveClarificationsInput.parse(args);
+        const result = await new ProjectOrchestrator().saveClarifications({
+          projectId,
+          questions,
+          refinedInput,
+        });
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'list_clarifications': {
+        const { projectId } = ListClarificationsInput.parse(args);
+        const items = await new ProjectOrchestrator().listClarifications(projectId);
+        return textResult(JSON.stringify({ projectId, clarifications: items }, null, 2));
       }
 
       default:
