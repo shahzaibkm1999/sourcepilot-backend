@@ -4,7 +4,11 @@ import type { Intake, CreateIntakeInput } from '../models/IntakeModel';
 import { DiscoveryModel } from '../models/DiscoveryModel';
 import type { Discovery, CreateDiscoveryInput } from '../models/DiscoveryModel';
 import { ClarificationModel } from '../models/ClarificationModel';
-import type { Clarification, CreateClarificationInput } from '../models/ClarificationModel';
+import type {
+  Clarification,
+  ClarificationQuestion,
+  CreateClarificationInput,
+} from '../models/ClarificationModel';
 import { ScopeModel } from '../models/ScopeModel';
 import type { Scope, CreateScopeInput } from '../models/ScopeModel';
 import { EstimateModel } from '../models/EstimateModel';
@@ -21,6 +25,17 @@ import { CompletenessModel } from '../models/CompletenessModel';
 import { DeepSeekService } from './DeepSeekService';
 import { computeCompleteness } from './CompletenessCalculator';
 import { buildLineage, LineageSnapshot } from './LineageBuilder';
+import {
+  DISCOVERY_SYSTEM,
+  DiscoverySchema,
+  buildDiscoveryUserPrompt,
+  CLARIFICATION_SYSTEM,
+  ClarificationBatchSchema,
+  buildClarificationUserPrompt,
+  parseStageJson,
+  DiscoveryOutput,
+  ClarificationBatchOutput,
+} from './PromptTemplates';
 
 /**
  * ProjectOrchestrator
@@ -89,21 +104,193 @@ export class ProjectOrchestrator {
     return IntakeModel.getLatestVersion(projectId);
   }
 
-  // ----------------------------------------------------------------
-  // Stage: Discovery (skeleton — wired in Phase 3)
-  // ----------------------------------------------------------------
-  async generateDiscovery(projectId: string): Promise<Discovery> {
-    // TODO Phase 3: call DeepSeek with intake + clarifications, parse JSON,
-    //              create Discovery row, link to latest intake, recompute completeness.
-    throw new Error('ProjectOrchestrator.generateDiscovery: not implemented yet (Phase 3)');
+  async getLatestDiscovery(projectId: string): Promise<Discovery | null> {
+    return DiscoveryModel.getLatestVersion(projectId);
+  }
+
+  async listClarifications(projectId: string): Promise<Clarification[]> {
+    return ClarificationModel.listForProject(projectId);
   }
 
   // ----------------------------------------------------------------
-  // Stage: Clarification (skeleton — wired in Phase 3)
+  // Stage: Discovery (wired in Phase 3)
   // ----------------------------------------------------------------
-  async saveClarifications(input: CreateClarificationInput): Promise<Clarification> {
-    // TODO Phase 3: persist, link to latest discovery, recompute completeness.
-    throw new Error('ProjectOrchestrator.saveClarifications: not implemented yet (Phase 3)');
+  /**
+   * Generate a discovery analysis for a project. Pulls the latest
+   * intake + any answered clarifications, asks DeepSeek to surface
+   * ambiguities / missing info / risks / assumptions, persists a new
+   * discovery row, links it to the latest intake, and recomputes
+   * completeness.
+   */
+  async generateDiscovery(projectId: string): Promise<{ discovery: Discovery; completeness: { score: number; missing: string[] } }> {
+    const intake = await IntakeModel.getLatestVersion(projectId);
+    if (!intake) {
+      throw new Error(`ProjectOrchestrator.generateDiscovery: no intake for project ${projectId}`);
+    }
+
+    // Gather every answered clarification so far (across versions),
+    // flatten into a single array for the prompt.
+    const priorClarifications = await ClarificationModel.listForProject(projectId);
+    const answered = priorClarifications
+      .flatMap((c) => c.questions)
+      .filter((q) => q.status === 'answered' && q.answer)
+      .map((q) => ({ area: q.area, question: q.question, answer: q.answer as string }));
+
+    const userPrompt = buildDiscoveryUserPrompt({ intake, answeredClarifications: answered });
+    const { content } = await this.deepseek.chat({
+      system: DISCOVERY_SYSTEM,
+      user: userPrompt,
+      temperature: 0.5,
+      maxOutputTokens: 4096,
+    });
+    const parsed = parseStageJson(content, DiscoverySchema) as DiscoveryOutput;
+
+    const created = await DiscoveryModel.create({
+      projectId,
+      ambiguities: parsed.ambiguities,
+      missingInfo: parsed.missing_info,
+      risks: parsed.risks.map((r) => ({
+        title: r.title,
+        severity: r.severity,
+        mitigation: r.mitigation || undefined,
+      })),
+      assumptions: parsed.assumptions,
+      content: parsed.content,
+    });
+
+    // Link: discovery derived_from intake
+    await ArtifactLinkModel.create({
+      projectId,
+      sourceType: 'discovery',
+      sourceId: created.id,
+      targetType: 'intake',
+      targetId: intake.id,
+      relation: 'derived_from',
+    });
+
+    const completeness = await this.recomputeCompleteness(projectId);
+    return { discovery: created, completeness };
+  }
+
+  // ----------------------------------------------------------------
+  // Stage: Clarification
+  // ----------------------------------------------------------------
+  /**
+   * Generate the *next* batch of clarification questions. Pulls
+   * the latest intake + discovery + every prior Q&A, asks DeepSeek
+   * to produce up to 5 fresh questions, persists them.
+   */
+  async generateClarifications(projectId: string): Promise<{ clarification: Clarification; completeness: { score: number; missing: string[] } }> {
+    const intake = await IntakeModel.getLatestVersion(projectId);
+    if (!intake) {
+      throw new Error(`ProjectOrchestrator.generateClarifications: no intake for project ${projectId}`);
+    }
+    const latestDiscovery = await DiscoveryModel.getLatestVersion(projectId);
+    const priorClarifications = await ClarificationModel.listForProject(projectId);
+    const priorQa = priorClarifications
+      .flatMap((c) => c.questions)
+      .filter((q) => q.status === 'answered' && q.answer)
+      .map((q) => ({ area: q.area, question: q.question, answer: q.answer as string }));
+
+    const userPrompt = buildClarificationUserPrompt({
+      intake,
+      latestDiscovery: latestDiscovery
+        ? { ambiguities: latestDiscovery.ambiguities ?? [] }
+        : null,
+      priorQa,
+    });
+
+    const { content } = await this.deepseek.chat({
+      system: CLARIFICATION_SYSTEM,
+      user: userPrompt,
+      temperature: 0.5,
+      maxOutputTokens: 2048,
+    });
+    const parsed = parseStageJson(content, ClarificationBatchSchema) as ClarificationBatchOutput;
+
+    const created = await ClarificationModel.create({
+      projectId,
+      questions: parsed.questions,
+      refinedInput: parsed.refined_input,
+    });
+
+    // Link: clarification derived_from intake (and discovery if present)
+    const targets: { type: string; id: string }[] = [
+      { type: 'intake', id: intake.id },
+    ];
+    if (latestDiscovery) targets.push({ type: 'discovery', id: latestDiscovery.id });
+    for (const t of targets) {
+      await ArtifactLinkModel.create({
+        projectId,
+        sourceType: 'clarification',
+        sourceId: created.id,
+        targetType: t.type,
+        targetId: t.id,
+        relation: 'derived_from',
+      });
+    }
+
+    const completeness = await this.recomputeCompleteness(projectId);
+    return { clarification: created, completeness };
+  }
+
+  /**
+   * Save answers to a previously generated clarification batch.
+   * The batch's questions are mutated in place (status flipped to
+   * "answered", answer filled). A new versioned clarification row
+   * is created so the lineage preserves every iteration.
+   */
+  async saveClarifications(input: CreateClarificationInput): Promise<{ clarification: Clarification; completeness: { score: number; missing: string[] } }> {
+    // Merge: start from the latest pending questions, overlay the
+    // answers the client just provided.
+    const latest = await ClarificationModel.getLatestVersion(input.projectId);
+    const previousQuestions: ClarificationQuestion[] = latest?.questions ?? [];
+
+    const answeredById = new Map<string, string>();
+    for (const q of input.questions) {
+      if (q.answer && q.answer.trim().length > 0) {
+        answeredById.set(q.id, q.answer.trim());
+      }
+    }
+
+    const merged: ClarificationQuestion[] = previousQuestions.map((q) => {
+      const fresh = input.questions.find((x) => x.id === q.id);
+      if (!fresh) return q; // unchanged
+      const answer = answeredById.get(q.id);
+      return {
+        ...q,
+        ...fresh,
+        answer: answer ?? q.answer ?? null,
+        status: answer ? 'answered' : 'pending',
+      };
+    });
+
+    // Newly added questions (not in previousQuestions) get appended
+    // as-is.
+    const existingIds = new Set(previousQuestions.map((q) => q.id));
+    const appended = input.questions.filter((q) => !existingIds.has(q.id));
+    const finalQuestions: ClarificationQuestion[] = [...merged, ...appended];
+
+    const created = await ClarificationModel.create({
+      projectId: input.projectId,
+      questions: finalQuestions,
+      refinedInput: input.refinedInput,
+    });
+
+    // Link the new iteration to the previous one (clarification supersedes clarification)
+    if (latest) {
+      await ArtifactLinkModel.create({
+        projectId: input.projectId,
+        sourceType: 'clarification',
+        sourceId: created.id,
+        targetType: 'clarification',
+        targetId: latest.id,
+        relation: 'supersedes',
+      });
+    }
+
+    const completeness = await this.recomputeCompleteness(input.projectId);
+    return { clarification: created, completeness };
   }
 
   // ----------------------------------------------------------------
