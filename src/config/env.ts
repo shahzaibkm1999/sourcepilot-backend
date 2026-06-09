@@ -13,7 +13,7 @@ dotenv.config();
  * with a plain `fetch` (see backend/src/services/DeepSeekService.ts).
  */
 const envSchema = z.object({
-  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  NODE_ENV: z.enum(['development', 'production', 'staging', 'test']).default('development'),
   PORT: z.coerce.number().int().positive().default(5000),
 
   DEEPSEEK_API_KEY: z.string().min(1, 'DEEPSEEK_API_KEY is required'),
