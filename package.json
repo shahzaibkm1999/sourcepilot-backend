@@ -1,7 +1,7 @@
 {
-  "name": "ai-software-planning-assistant-backend",
+  "name": "sourcepilot-backend",
   "version": "0.1.0",
-  "description": "Backend for AI Powered Software Planning Assistant MVP - generates software plans/specifications from project ideas using Gemini AI, exposed via REST API and MCP server.",
+  "description": "SourcePilot backend — turns client requests into versioned, traceable project blueprints. Generates specs and other workflow artifacts using DeepSeek AI, exposed via REST API and MCP server.",
   "main": "dist/server.js",
   "scripts": {
     "build": "tsc",
@@ -9,19 +9,20 @@
     "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
     "mcp": "ts-node src/mcp/server.ts",
     "mcp:dev": "ts-node-dev --respawn --transpile-only src/mcp/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:deepseek": "ts-node scripts/test-deepseek.ts",
+    "test:deepseek-models": "ts-node scripts/test-deepseek-models.ts"
   },
   "keywords": [
-    "ai-software-planning-assistant",
-    "mcp",
-    "gemini",
+    "sourcepilot",
+    "spec-driven",
+    "deepseek",
     "supabase",
-    "mvc"
+    "mcp"
   ],
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@google/generative-ai": "^0.21.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "@supabase/supabase-js": "^2.45.4",
     "cors": "^2.8.5",

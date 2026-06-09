@@ -11,7 +11,7 @@ app.listen(env.PORT, () => {
     `🚀 AI Software Planning Assistant API listening on http://localhost:${env.PORT}  (${env.NODE_ENV})`,
   );
   // eslint-disable-next-line no-console
-  console.log(`   Using model: ${env.GEMINI_MODEL}`);
+  console.log(`   Using model: ${env.DEEPSEEK_MODEL}`);
   // eslint-disable-next-line no-console
   console.log(`   Supabase:    ${env.SUPABASE_URL}`);
 });

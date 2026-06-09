@@ -20,7 +20,7 @@ app.get('/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
     service: 'ai-software-planning-assistant-backend',
-    model: env.GEMINI_MODEL,
+    model: env.DEEPSEEK_MODEL,
     timestamp: new Date().toISOString(),
   });
 });
@@ -35,6 +35,10 @@ app.get('/', (_req: Request, res: Response) => {
       'GET    /api/projects',
       'GET    /api/projects/:name',
       'GET    /api/projects/:name/specifications',
+      'GET    /api/projects/:id/completeness          (SourcePilot)',
+      'GET    /api/artifacts/:projectId/lineage       (SourcePilot)',
+      'POST   /api/intake                              (SourcePilot)',
+      'GET    /api/intake/:projectId/latest            (SourcePilot)',
       'GET    /api/specifications',
       'GET    /api/specifications/:id',
       'GET    /api/specifications/by-name/:name',
