@@ -3,6 +3,8 @@ import projectRoutes from './projectRoutes';
 import specificationRoutes from './specificationRoutes';
 import artifactRoutes from './artifactRoutes';
 import intakeRoutes from './intakeRoutes';
+import discoveryRoutes from './discoveryRoutes';
+import clarificationRoutes from './clarificationRoutes';
 
 const router = Router();
 
@@ -10,5 +12,7 @@ router.use('/projects', projectRoutes);
 router.use('/specifications', specificationRoutes);
 router.use('/artifacts', artifactRoutes);
 router.use('/intake', intakeRoutes);
+router.use('/discoveries', discoveryRoutes);
+router.use('/clarifications', clarificationRoutes);
 
 export default router;
