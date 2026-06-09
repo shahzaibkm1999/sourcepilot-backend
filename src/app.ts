@@ -7,12 +7,7 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 const app = express();
 
 // ---- Global middleware ----
-app.use(
-  cors({
-    origin: env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(',').map((s) => s.trim()),
-    credentials: false,
-  }),
-);
+app.use(cors()); // Enable all CORS requests
 app.use(express.json({ limit: '2mb' }));
 
 // ---- Health check ----
