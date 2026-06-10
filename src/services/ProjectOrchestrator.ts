@@ -32,9 +32,21 @@ import {
   CLARIFICATION_SYSTEM,
   ClarificationBatchSchema,
   buildClarificationUserPrompt,
+  SCOPE_SYSTEM,
+  ScopeSchema,
+  buildScopeUserPrompt,
+  ESTIMATE_SYSTEM,
+  EstimateSchema,
+  buildEstimateUserPrompt,
+  TIMELINE_SYSTEM,
+  TimelineSchema,
+  buildTimelineUserPrompt,
   parseStageJson,
   DiscoveryOutput,
   ClarificationBatchOutput,
+  ScopeOutput,
+  EstimateOutput,
+  TimelineOutput,
 } from './PromptTemplates';
 
 /**
@@ -106,6 +118,18 @@ export class ProjectOrchestrator {
 
   async getLatestDiscovery(projectId: string): Promise<Discovery | null> {
     return DiscoveryModel.getLatestVersion(projectId);
+  }
+
+  async getLatestScope(projectId: string): Promise<Scope | null> {
+    return ScopeModel.getLatestVersion(projectId);
+  }
+
+  async getLatestEstimate(projectId: string): Promise<Estimate | null> {
+    return EstimateModel.getLatestVersion(projectId);
+  }
+
+  async getLatestTimeline(projectId: string): Promise<Timeline | null> {
+    return TimelineModel.getLatestVersion(projectId);
   }
 
   async listClarifications(projectId: string): Promise<Clarification[]> {
@@ -294,27 +318,212 @@ export class ProjectOrchestrator {
   }
 
   // ----------------------------------------------------------------
-  // Stage: Scope (skeleton — wired in Phase 4)
+  // Stage: Scope
   // ----------------------------------------------------------------
-  async generateScope(projectId: string): Promise<Scope> {
-    // TODO Phase 4.
-    throw new Error('ProjectOrchestrator.generateScope: not implemented yet (Phase 4)');
+  async generateScope(projectId: string): Promise<{ scope: Scope; completeness: { score: number; missing: string[] } }> {
+    const intake = await IntakeModel.getLatestVersion(projectId);
+    if (!intake) throw new Error(`generateScope: no intake for project ${projectId}`);
+    const latestDiscovery = await DiscoveryModel.getLatestVersion(projectId);
+    if (!latestDiscovery) {
+      throw new Error(`generateScope: no discovery for project ${projectId} — run Discovery first`);
+    }
+    const priorClarifications = await ClarificationModel.listForProject(projectId);
+    const answered = priorClarifications
+      .flatMap((c) => c.questions)
+      .filter((q) => q.status === 'answered' && q.answer)
+      .map((q) => ({ area: q.area, question: q.question, answer: q.answer as string }));
+
+    const userPrompt = buildScopeUserPrompt({
+      intake,
+      discovery: {
+        ambiguities: latestDiscovery.ambiguities ?? [],
+        risks: (latestDiscovery.risks ?? []).map((r) => ({ title: r.title, severity: r.severity })),
+      },
+      answeredClarifications: answered,
+    });
+    const { content } = await this.deepseek.chat({
+      system: SCOPE_SYSTEM,
+      user: userPrompt,
+      temperature: 0.5,
+      maxOutputTokens: 4096,
+    });
+    const parsed = parseStageJson(content, ScopeSchema) as ScopeOutput;
+
+    const created = await ScopeModel.create({
+      projectId,
+      inScope: parsed.in_scope,
+      outOfScope: parsed.out_of_scope,
+      futureConsiderations: parsed.future_considerations,
+      dependencies: parsed.dependencies,
+      assumptions: parsed.assumptions,
+      risks: parsed.risks,
+      content: parsed.content,
+    });
+
+    // Links: scope derived_from intake + discovery + (latest) clarification
+    const targets: { type: string; id: string }[] = [
+      { type: 'intake', id: intake.id },
+      { type: 'discovery', id: latestDiscovery.id },
+    ];
+    if (answered.length > 0) {
+      const latestClar = await ClarificationModel.getLatestVersion(projectId);
+      if (latestClar) targets.push({ type: 'clarification', id: latestClar.id });
+    }
+    for (const t of targets) {
+      await ArtifactLinkModel.create({
+        projectId,
+        sourceType: 'scope',
+        sourceId: created.id,
+        targetType: t.type,
+        targetId: t.id,
+        relation: 'derived_from',
+      });
+    }
+
+    const completeness = await this.recomputeCompleteness(projectId);
+    return { scope: created, completeness };
   }
 
   // ----------------------------------------------------------------
-  // Stage: Estimate (skeleton — wired in Phase 4)
+  // Stage: Estimate
   // ----------------------------------------------------------------
-  async generateEstimate(projectId: string): Promise<Estimate> {
-    // TODO Phase 4.
-    throw new Error('ProjectOrchestrator.generateEstimate: not implemented yet (Phase 4)');
+  async generateEstimate(projectId: string): Promise<{ estimate: Estimate; completeness: { score: number; missing: string[] } }> {
+    const intake = await IntakeModel.getLatestVersion(projectId);
+    if (!intake) throw new Error(`generateEstimate: no intake for project ${projectId}`);
+    const latestScope = await ScopeModel.getLatestVersion(projectId);
+    if (!latestScope) {
+      throw new Error(`generateEstimate: no scope for project ${projectId} — run Scope first`);
+    }
+    const priorClarifications = await ClarificationModel.listForProject(projectId);
+    const answered = priorClarifications
+      .flatMap((c) => c.questions)
+      .filter((q) => q.status === 'answered' && q.answer)
+      .map((q) => ({ area: q.area, question: q.question, answer: q.answer as string }));
+
+    const userPrompt = buildEstimateUserPrompt({
+      intake,
+      scope: {
+        in_scope: latestScope.in_scope ?? [],
+        out_of_scope: latestScope.out_of_scope ?? [],
+        dependencies: latestScope.dependencies ?? [],
+      },
+      answeredClarifications: answered,
+    });
+    const { content } = await this.deepseek.chat({
+      system: ESTIMATE_SYSTEM,
+      user: userPrompt,
+      temperature: 0.4,
+      maxOutputTokens: 4096,
+    });
+    const parsed = parseStageJson(content, EstimateSchema) as EstimateOutput;
+
+    const items = parsed.items.map((i) => ({
+      area: i.area,
+      hours: Math.min(i.hours, i.high_hours),
+      complexity: i.complexity,
+      confidence: i.confidence,
+    }));
+    const totalHoursLow = items.reduce((s, i) => s + i.hours, 0);
+    const totalHoursHigh = items.reduce((s, i) => s + (parsed.items.find((x) => x.area === i.area)?.high_hours ?? i.hours), 0);
+
+    const created = await EstimateModel.create({
+      projectId,
+      items,
+      budgetRange: parsed.fixed_high > 0
+        ? { min: parsed.fixed_low, max: parsed.fixed_high, currency: parsed.currency }
+        : undefined,
+      riskBuffer: parsed.fixed_high > 0
+        ? Math.round((parsed.fixed_low + parsed.fixed_high) / 2 * (parsed.risk_buffer_percent / 100))
+        : undefined,
+      totalHoursLow,
+      totalHoursHigh,
+      content: parsed.content,
+    });
+
+    // Link: estimate derived_from scope (+ intake, + clarification if any)
+    const targets: { type: string; id: string }[] = [
+      { type: 'intake', id: intake.id },
+      { type: 'scope', id: latestScope.id },
+    ];
+    if (answered.length > 0) {
+      const latestClar = await ClarificationModel.getLatestVersion(projectId);
+      if (latestClar) targets.push({ type: 'clarification', id: latestClar.id });
+    }
+    for (const t of targets) {
+      await ArtifactLinkModel.create({
+        projectId,
+        sourceType: 'estimate',
+        sourceId: created.id,
+        targetType: t.type,
+        targetId: t.id,
+        relation: 'derived_from',
+      });
+    }
+
+    const completeness = await this.recomputeCompleteness(projectId);
+    return { estimate: created, completeness };
   }
 
   // ----------------------------------------------------------------
-  // Stage: Timeline (skeleton — wired in Phase 4)
+  // Stage: Timeline
   // ----------------------------------------------------------------
-  async generateTimeline(projectId: string): Promise<Timeline> {
-    // TODO Phase 4.
-    throw new Error('ProjectOrchestrator.generateTimeline: not implemented yet (Phase 4)');
+  async generateTimeline(projectId: string): Promise<{ timeline: Timeline; completeness: { score: number; missing: string[] } }> {
+    const intake = await IntakeModel.getLatestVersion(projectId);
+    if (!intake) throw new Error(`generateTimeline: no intake for project ${projectId}`);
+    const latestEstimate = await EstimateModel.getLatestVersion(projectId);
+    if (!latestEstimate) {
+      throw new Error(`generateTimeline: no estimate for project ${projectId} — run Estimate first`);
+    }
+    const latestScope = await ScopeModel.getLatestVersion(projectId);
+    const priorClarifications = await ClarificationModel.listForProject(projectId);
+    const answered = priorClarifications
+      .flatMap((c) => c.questions)
+      .filter((q) => q.status === 'answered' && q.answer)
+      .map((q) => ({ area: q.area, question: q.question, answer: q.answer as string }));
+
+    const userPrompt = buildTimelineUserPrompt({
+      timelinePref: intake.timeline_pref,
+      totalHoursLow: latestEstimate.total_hours_low ?? 0,
+      totalHoursHigh: latestEstimate.total_hours_high ?? 0,
+      scope: { in_scope: latestScope?.in_scope ?? [] },
+      answeredClarifications: answered,
+    });
+    const { content } = await this.deepseek.chat({
+      system: TIMELINE_SYSTEM,
+      user: userPrompt,
+      temperature: 0.4,
+      // The reasoning model needs room to think + produce a 6-phase
+      // timeline with milestones. 4096 = safe upper bound.
+      maxOutputTokens: 4096,
+    });
+    const parsed = parseStageJson(content, TimelineSchema) as TimelineOutput;
+
+    const created = await TimelineModel.create({
+      projectId,
+      phases: parsed.phases,
+      totalWeeks: parsed.total_weeks,
+      content: parsed.content,
+    });
+
+    // Link: timeline derived_from estimate + scope
+    const targets: { type: string; id: string }[] = [
+      { type: 'intake', id: intake.id },
+      { type: 'estimate', id: latestEstimate.id },
+    ];
+    if (latestScope) targets.push({ type: 'scope', id: latestScope.id });
+    for (const t of targets) {
+      await ArtifactLinkModel.create({
+        projectId,
+        sourceType: 'timeline',
+        sourceId: created.id,
+        targetType: t.type,
+        targetId: t.id,
+        relation: 'derived_from',
+      });
+    }
+
+    const completeness = await this.recomputeCompleteness(projectId);
+    return { timeline: created, completeness };
   }
 
   // ----------------------------------------------------------------
