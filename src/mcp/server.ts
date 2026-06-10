@@ -110,6 +110,25 @@ const ListClarificationsInput = z.object({
   projectId: z.string().uuid().describe('The project UUID.'),
 });
 
+const GenerateScopeInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID (must already have an intake and discovery).'),
+});
+const GetScopeInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+const GenerateEstimateInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID (must already have a scope).'),
+});
+const GetEstimateInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+const GenerateTimelineInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID (must already have an estimate).'),
+});
+const GetTimelineInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+
 // ---- Tool definitions for the MCP client ----
 const TOOLS = [
   {
@@ -304,6 +323,69 @@ const TOOLS = [
       required: ['projectId'],
     },
   },
+  {
+    name: 'generate_scope',
+    description:
+      'SourcePilot: generate the scope document (in/out/future scope, dependencies, assumptions, risks) from the intake + discovery + clarifications. Returns the scope row and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID (must have an intake and discovery).' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'get_scope',
+    description: 'SourcePilot: get the latest scope row for a project.',
+    inputSchema: {
+      type: 'object',
+      properties: { projectId: { type: 'string', description: 'The project UUID.' } },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'generate_estimate',
+    description:
+      'SourcePilot: generate the effort estimate (per-area hours + complexity + confidence; budget range for fixed-price or hourly rate for hourly engagements). Returns the estimate row and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID (must have a scope).' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'get_estimate',
+    description: 'SourcePilot: get the latest estimate row for a project.',
+    inputSchema: {
+      type: 'object',
+      properties: { projectId: { type: 'string', description: 'The project UUID.' } },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'generate_timeline',
+    description:
+      'SourcePilot: generate the phased project timeline (phases with durations, milestones, dependencies). Returns the timeline row and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID (must have an estimate).' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'get_timeline',
+    description: 'SourcePilot: get the latest timeline row for a project.',
+    inputSchema: {
+      type: 'object',
+      properties: { projectId: { type: 'string', description: 'The project UUID.' } },
+      required: ['projectId'],
+    },
+  },
 ] as const;
 
 // ---- The server itself ----
@@ -425,6 +507,45 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { projectId } = ListClarificationsInput.parse(args);
         const items = await new ProjectOrchestrator().listClarifications(projectId);
         return textResult(JSON.stringify({ projectId, clarifications: items }, null, 2));
+      }
+
+      case 'generate_scope': {
+        const { projectId } = GenerateScopeInput.parse(args);
+        const result = await new ProjectOrchestrator().generateScope(projectId);
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'get_scope': {
+        const { projectId } = GetScopeInput.parse(args);
+        const scope = await new ProjectOrchestrator().getLatestScope(projectId);
+        if (!scope) return textResult(`No scope for project ${projectId}.`);
+        return textResult(JSON.stringify(scope, null, 2));
+      }
+
+      case 'generate_estimate': {
+        const { projectId } = GenerateEstimateInput.parse(args);
+        const result = await new ProjectOrchestrator().generateEstimate(projectId);
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'get_estimate': {
+        const { projectId } = GetEstimateInput.parse(args);
+        const estimate = await new ProjectOrchestrator().getLatestEstimate(projectId);
+        if (!estimate) return textResult(`No estimate for project ${projectId}.`);
+        return textResult(JSON.stringify(estimate, null, 2));
+      }
+
+      case 'generate_timeline': {
+        const { projectId } = GenerateTimelineInput.parse(args);
+        const result = await new ProjectOrchestrator().generateTimeline(projectId);
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'get_timeline': {
+        const { projectId } = GetTimelineInput.parse(args);
+        const timeline = await new ProjectOrchestrator().getLatestTimeline(projectId);
+        if (!timeline) return textResult(`No timeline for project ${projectId}.`);
+        return textResult(JSON.stringify(timeline, null, 2));
       }
 
       default:
