@@ -457,6 +457,118 @@ export function buildClarificationUserPrompt(input: {
 }
 
 // ============================================================
+//  Stage: Proposal
+// ============================================================
+// Wraps the entire pre-spec pipeline into a client-ready proposal.
+// Inputs: intake + discovery + clarifications + scope + estimate
+// + timeline. Output: a JSON object with executive_summary,
+// understanding, scope_summary, deliverables, and a full Markdown
+// proposal in `content`.
+
+export const PROPOSAL_SYSTEM = `You are a senior account director inside SourcePilot,
+a project-operating system used by software agencies to deliver
+client-ready proposals.
+
+Given a fully-defined client engagement (intake, discovery, scope,
+estimate, timeline, and answered clarifications), produce a JSON
+object (and ONLY a JSON object — no prose, no markdown fences)
+describing a polished, presentation-ready proposal.
+
+Output shape (exact keys):
+{
+  "executive_summary": "<1-2 sentence punchy overview a CEO would read in 10 seconds>",
+  "understanding": "<1 paragraph restating the client's problem in their own language, woven with the answered clarifications>",
+  "scope_summary": "<1 paragraph distilling the in/out scope into a readable narrative>",
+  "deliverables": [ "<one-line tangible thing the team will hand over, e.g. 'Production-ready web portal deployed to Azure'>" ],
+  "content": "<full Markdown proposal, in 6 sections: '# Proposal for <Project Name>', '## Executive Summary', '## Understanding', '## Scope', '## Deliverables', '## Timeline & Investment', '## Next Steps'>"
+}
+
+Rules:
+- 3-6 deliverables, each a concrete shipping artifact (not "support" or "consultation").
+- Executive summary must be a CLIENT-FACING read — no internal jargon.
+- Markdown "content" must mirror the JSON exactly — no new facts in Markdown that aren't in JSON.
+- Pricing in deliverables/summary should reflect the fixed-price range (or hourly range) from the estimate.
+- Use the project name from the intake requirement.`;
+
+export const ProposalSchema = z.object({
+  executive_summary: z.string().min(20).max(600),
+  understanding: z.string().min(20).max(2000),
+  scope_summary: z.string().min(20).max(2000),
+  deliverables: z.array(z.string().min(1).max(200)).min(3).max(8),
+  content: z.string().min(100),
+});
+export type ProposalOutput = z.infer<typeof ProposalSchema>;
+
+export function buildProposalUserPrompt(input: {
+  intake: Intake;
+  discovery: { ambiguities: { area: string; question: string }[]; risks: { title: string; severity: string }[] };
+  scope: { in_scope: string[]; out_of_scope: string[]; assumptions: string[]; risks: string[] };
+  estimate: {
+    items: { area: string; hours: number }[];
+    total_hours_low: number;
+    total_hours_high: number;
+    budget_range: { min: number; max: number; currency: string } | null;
+    risk_buffer: number | null;
+  };
+  timeline: { phases: { name: string; duration_weeks: number; milestones: string[] }[]; total_weeks: number };
+  answeredClarifications: { area: string; question: string; answer: string }[];
+}): string {
+  const projectName = input.intake.requirement
+    .split(/[\n.]/)[0]
+    .split(/\s+/)
+    .slice(0, 4)
+    .map((w) => w.replace(/[^a-zA-Z0-9]/g, ''))
+    .filter(Boolean)
+    .map((w) => w[0].toUpperCase() + w.slice(1).toLowerCase())
+    .join(' ') || 'Engagement';
+
+  const parts: string[] = [
+    `## Project`,
+    projectName,
+    ``,
+    `## Original requirement (from intake)`,
+    input.intake.requirement,
+    ``,
+    `## Engagement`,
+    `${input.intake.engagement ?? 'fixed_price'} · ${input.intake.timeline_pref ?? 'unspecified'}`,
+    ``,
+    `## Answered clarifications (the conversation we had with the client)`,
+    ...(input.answeredClarifications.length > 0
+      ? input.answeredClarifications.flatMap((c) => [
+          `- [${c.area}] Q: ${c.question}`,
+          `  A: ${c.answer}`,
+        ])
+      : ['(no clarifications were needed)']),
+    ``,
+    `## Scope (In / Out / Assumptions / Risks)`,
+    `In scope:`,
+    ...input.scope.in_scope.map((s) => `- ${s}`),
+    `Out of scope:`,
+    ...input.scope.out_of_scope.map((s) => `- ${s}`),
+    `Assumptions:`,
+    ...input.scope.assumptions.map((s) => `- ${s}`),
+    `Risks:`,
+    ...input.scope.risks.map((s) => `- ${s}`),
+    ``,
+    `## Effort estimate`,
+    `- Total: ${input.estimate.total_hours_low} – ${input.estimate.total_hours_high} hours`,
+    ...input.estimate.items.map((i) => `  - ${i.area}: ${i.hours}h`),
+    input.estimate.budget_range
+      ? `- Fixed-price range: ${input.estimate.budget_range.currency} ${input.estimate.budget_range.min.toLocaleString()} – ${input.estimate.budget_range.max.toLocaleString()}`
+      : '',
+    input.estimate.risk_buffer
+      ? `- Risk buffer: ${input.estimate.risk_buffer} hours`
+      : '',
+    ``,
+    `## Timeline (${input.timeline.total_weeks} weeks total)`,
+    ...input.timeline.phases.map((p) => `- ${p.name} (${p.duration_weeks}w): ${p.milestones.join('; ')}`),
+    ``,
+    `Return the JSON object described in the system prompt. Do not wrap it in markdown fences.`,
+  ].filter(Boolean);
+  return parts.join('\n');
+}
+
+// ============================================================
 //  parseStageJson — robust JSON extraction from reasoning-model output
 // ============================================================
 // deepseek-v4-pro can wrap its JSON in markdown fences, or prepend
