@@ -41,12 +41,16 @@ import {
   TIMELINE_SYSTEM,
   TimelineSchema,
   buildTimelineUserPrompt,
+  PROPOSAL_SYSTEM,
+  ProposalSchema,
+  buildProposalUserPrompt,
   parseStageJson,
   DiscoveryOutput,
   ClarificationBatchOutput,
   ScopeOutput,
   EstimateOutput,
   TimelineOutput,
+  ProposalOutput,
 } from './PromptTemplates';
 
 /**
@@ -130,6 +134,10 @@ export class ProjectOrchestrator {
 
   async getLatestTimeline(projectId: string): Promise<Timeline | null> {
     return TimelineModel.getLatestVersion(projectId);
+  }
+
+  async getLatestProposal(projectId: string): Promise<Proposal | null> {
+    return ProposalModel.getLatestVersion(projectId);
   }
 
   async listClarifications(projectId: string): Promise<Clarification[]> {
@@ -527,11 +535,104 @@ export class ProjectOrchestrator {
   }
 
   // ----------------------------------------------------------------
-  // Stage: Proposal (skeleton — wired in Phase 5)
+  // Stage: Proposal
   // ----------------------------------------------------------------
-  async generateProposal(projectId: string): Promise<Proposal> {
-    // TODO Phase 5.
-    throw new Error('ProjectOrchestrator.generateProposal: not implemented yet (Phase 5)');
+  /**
+   * Generate a client-ready proposal that wraps the entire pre-spec
+   * pipeline. Pulls every upstream artifact (intake + discovery +
+   * clarifications + scope + estimate + timeline), asks DeepSeek to
+   * produce a polished proposal, persists it, links back to all
+   * upstream stages, and recomputes completeness.
+   */
+  async generateProposal(projectId: string): Promise<{ proposal: Proposal; completeness: { score: number; missing: string[] } }> {
+    const intake = await IntakeModel.getLatestVersion(projectId);
+    if (!intake) throw new Error(`generateProposal: no intake for project ${projectId}`);
+    const latestDiscovery = await DiscoveryModel.getLatestVersion(projectId);
+    if (!latestDiscovery) throw new Error(`generateProposal: no discovery — run Discovery first`);
+    const latestScope = await ScopeModel.getLatestVersion(projectId);
+    if (!latestScope) throw new Error(`generateProposal: no scope — run Scope first`);
+    const latestEstimate = await EstimateModel.getLatestVersion(projectId);
+    if (!latestEstimate) throw new Error(`generateProposal: no estimate — run Estimate first`);
+    const latestTimeline = await TimelineModel.getLatestVersion(projectId);
+    if (!latestTimeline) throw new Error(`generateProposal: no timeline — run Timeline first`);
+
+    const priorClarifications = await ClarificationModel.listForProject(projectId);
+    const answered = priorClarifications
+      .flatMap((c) => c.questions)
+      .filter((q) => q.status === 'answered' && q.answer)
+      .map((q) => ({ area: q.area, question: q.question, answer: q.answer as string }));
+
+    const userPrompt = buildProposalUserPrompt({
+      intake,
+      discovery: {
+        ambiguities: latestDiscovery.ambiguities ?? [],
+        risks: (latestDiscovery.risks ?? []).map((r) => ({ title: r.title, severity: r.severity })),
+      },
+      scope: {
+        in_scope: latestScope.in_scope ?? [],
+        out_of_scope: latestScope.out_of_scope ?? [],
+        assumptions: latestScope.assumptions ?? [],
+        risks: latestScope.risks ?? [],
+      },
+      estimate: {
+        items: (latestEstimate.items ?? []).map((i) => ({ area: i.area, hours: i.hours })),
+        total_hours_low: latestEstimate.total_hours_low ?? 0,
+        total_hours_high: latestEstimate.total_hours_high ?? 0,
+        budget_range: latestEstimate.budget_range ?? null,
+        risk_buffer: latestEstimate.risk_buffer ?? null,
+      },
+      timeline: {
+        phases: (latestTimeline.phases ?? []).map((p) => ({ name: p.name, duration_weeks: p.duration_weeks, milestones: p.milestones })),
+        total_weeks: latestTimeline.total_weeks ?? 0,
+      },
+      answeredClarifications: answered,
+    });
+
+    const { content } = await this.deepseek.chat({
+      system: PROPOSAL_SYSTEM,
+      user: userPrompt,
+      temperature: 0.5,
+      // The full proposal `content` (6-section markdown) routinely
+      // exceeds 4096 visible tokens once reasoning is added. 6144
+      // gives enough room for both.
+      maxOutputTokens: 6144,
+    });
+    const parsed = parseStageJson(content, ProposalSchema) as ProposalOutput;
+
+    const created = await ProposalModel.create({
+      projectId,
+      executiveSummary: parsed.executive_summary,
+      understanding: parsed.understanding,
+      scopeSummary: parsed.scope_summary,
+      deliverables: parsed.deliverables,
+      content: parsed.content,
+    });
+
+    // Link to every upstream artifact (derived_from).
+    const targets: { type: string; id: string }[] = [
+      { type: 'intake', id: intake.id },
+      { type: 'discovery', id: latestDiscovery.id },
+      { type: 'scope', id: latestScope.id },
+      { type: 'estimate', id: latestEstimate.id },
+      { type: 'timeline', id: latestTimeline.id },
+    ];
+    if (answered.length > 0) {
+      const latestClar = await ClarificationModel.getLatestVersion(projectId);
+      if (latestClar) targets.push({ type: 'clarification', id: latestClar.id });
+    }
+    for (const t of targets) {
+      await ArtifactLinkModel.create({
+        projectId,
+        sourceType: 'proposal',
+        sourceId: created.id,
+        targetType: t.type,
+        targetId: t.id,
+        relation: 'derived_from',
+      });
+    }
+
+    const completeness = await this.recomputeCompleteness(projectId);
+    return { proposal: created, completeness };
   }
 
   // ----------------------------------------------------------------
