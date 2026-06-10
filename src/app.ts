@@ -45,6 +45,8 @@ app.get('/', (_req: Request, res: Response) => {
       'GET    /api/estimate/:projectId/latest          (SourcePilot)',
       'POST   /api/timeline/generate                   (SourcePilot)',
       'GET    /api/timeline/:projectId/latest          (SourcePilot)',
+      'POST   /api/proposal/generate                  (SourcePilot)',
+      'GET    /api/proposal/:projectId/latest         (SourcePilot)',
       'GET    /api/specifications',
       'GET    /api/specifications/:id',
       'GET    /api/specifications/by-name/:name',

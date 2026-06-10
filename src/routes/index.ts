@@ -8,6 +8,7 @@ import clarificationRoutes from './clarificationRoutes';
 import scopeRoutes from './scopeRoutes';
 import estimateRoutes from './estimateRoutes';
 import timelineRoutes from './timelineRoutes';
+import proposalRoutes from './proposalRoutes';
 
 const router = Router();
 
@@ -20,5 +21,6 @@ router.use('/clarifications', clarificationRoutes);
 router.use('/scope', scopeRoutes);
 router.use('/estimate', estimateRoutes);
 router.use('/timeline', timelineRoutes);
+router.use('/proposal', proposalRoutes);
 
 export default router;
