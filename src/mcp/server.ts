@@ -129,6 +129,13 @@ const GetTimelineInput = z.object({
   projectId: z.string().uuid().describe('The project UUID.'),
 });
 
+const GenerateProposalInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID (must have intake, discovery, scope, estimate, and timeline).'),
+});
+const GetProposalInput = z.object({
+  projectId: z.string().uuid().describe('The project UUID.'),
+});
+
 // ---- Tool definitions for the MCP client ----
 const TOOLS = [
   {
@@ -386,6 +393,27 @@ const TOOLS = [
       required: ['projectId'],
     },
   },
+  {
+    name: 'generate_proposal',
+    description:
+      'SourcePilot: generate the client-ready proposal that wraps the entire pre-spec pipeline. Returns the proposal row and updated completeness score.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        projectId: { type: 'string', description: 'The project UUID (must have intake, discovery, scope, estimate, and timeline).' },
+      },
+      required: ['projectId'],
+    },
+  },
+  {
+    name: 'get_proposal',
+    description: 'SourcePilot: get the latest proposal row for a project.',
+    inputSchema: {
+      type: 'object',
+      properties: { projectId: { type: 'string', description: 'The project UUID.' } },
+      required: ['projectId'],
+    },
+  },
 ] as const;
 
 // ---- The server itself ----
@@ -546,6 +574,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const timeline = await new ProjectOrchestrator().getLatestTimeline(projectId);
         if (!timeline) return textResult(`No timeline for project ${projectId}.`);
         return textResult(JSON.stringify(timeline, null, 2));
+      }
+
+      case 'generate_proposal': {
+        const { projectId } = GenerateProposalInput.parse(args);
+        const result = await new ProjectOrchestrator().generateProposal(projectId);
+        return textResult(JSON.stringify(result, null, 2));
+      }
+
+      case 'get_proposal': {
+        const { projectId } = GetProposalInput.parse(args);
+        const proposal = await new ProjectOrchestrator().getLatestProposal(projectId);
+        if (!proposal) return textResult(`No proposal for project ${projectId}.`);
+        return textResult(JSON.stringify(proposal, null, 2));
       }
 
       default:
