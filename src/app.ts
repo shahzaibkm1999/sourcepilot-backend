@@ -7,14 +7,19 @@ import { errorHandler, notFoundHandler } from './middleware/errorHandler';
 const app = express();
 
 // ---- Global middleware ----
-app.use(cors()); // Enable all CORS requests
+app.use(
+  cors({
+    origin: env.CORS_ORIGIN === '*' ? true : env.CORS_ORIGIN.split(',').map((s) => s.trim()),
+    credentials: false,
+  }),
+);
 app.use(express.json({ limit: '2mb' }));
 
 // ---- Health check ----
 app.get('/health', (_req: Request, res: Response) => {
   res.json({
     status: 'ok',
-    service: 'ai-software-planning-assistant-backend',
+    service: 'docforge-backend',
     model: env.DEEPSEEK_MODEL,
     timestamp: new Date().toISOString(),
   });
@@ -23,35 +28,18 @@ app.get('/health', (_req: Request, res: Response) => {
 // ---- API routes ----
 app.get('/', (_req: Request, res: Response) => {
   res.json({
-    name: 'AI Software Planning Assistant API',
-    version: '0.1.0',
+    name: 'docforge API',
+    version: '0.2.0',
+    description:
+      'Audience-aware client document generator. Two templates: ' +
+      '`proposal` (non-technical client) and `tech_scope` (technical client).',
     endpoints: [
       'GET    /health',
       'GET    /api/projects',
-      'GET    /api/projects/:name',
-      'GET    /api/projects/:name/specifications',
-      'GET    /api/projects/:id/completeness          (SourcePilot)',
-      'GET    /api/artifacts/:projectId/lineage       (SourcePilot)',
-      'POST   /api/intake                              (SourcePilot)',
-      'GET    /api/intake/:projectId/latest            (SourcePilot)',
-      'POST   /api/discoveries/generate                (SourcePilot)',
-      'GET    /api/discoveries/:projectId/latest       (SourcePilot)',
-      'POST   /api/clarifications/generate             (SourcePilot)',
-      'POST   /api/clarifications/save                 (SourcePilot)',
-      'GET    /api/clarifications/:projectId          (SourcePilot)',
-      'POST   /api/scope/generate                      (SourcePilot)',
-      'GET    /api/scope/:projectId/latest             (SourcePilot)',
-      'POST   /api/estimate/generate                   (SourcePilot)',
-      'GET    /api/estimate/:projectId/latest          (SourcePilot)',
-      'POST   /api/timeline/generate                   (SourcePilot)',
-      'GET    /api/timeline/:projectId/latest          (SourcePilot)',
-      'POST   /api/proposal/generate                  (SourcePilot)',
-      'GET    /api/proposal/:projectId/latest         (SourcePilot)',
-      'GET    /api/specifications',
-      'GET    /api/specifications/:id',
-      'GET    /api/specifications/by-name/:name',
-      'POST   /api/specifications/generate',
-      'POST   /api/specifications/save',
+      'POST   /api/projects                       — capture a new project (intake)',
+      'GET    /api/projects/:id                  — single project + its documents',
+      'POST   /api/projects/:id/documents        — generate a document (proposal|tech_scope)',
+      'GET    /api/projects/documents/:id        — fetch a single document',
     ],
   });
 });
