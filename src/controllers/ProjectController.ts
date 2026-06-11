@@ -113,15 +113,21 @@ export class ProjectController {
     }
   }
 
-  /** POST /api/projects/:id/documents — generate a document */
+  /**
+   * POST /api/projects/:id/documents — enqueue a document
+   * generation. Returns a `pending` row immediately; the AI call
+   * runs in the background and updates the row to `ready` or
+   * `failed`. The frontend polls `GET /api/projects/:id` to
+   * observe the state change.
+   */
   static async generateDocument(req: Request, res: Response, next: NextFunction) {
     try {
       const { id } = req.params;
       if (!id) return res.status(400).json({ error: 'Project id is required' });
 
       const { doc_type } = generateDocSchema.parse(req.body);
-      const document = await new DocumentOrchestrator().generate(id, doc_type as DocType);
-      res.status(201).json({ document });
+      const document = await new DocumentOrchestrator().enqueue(id, doc_type as DocType);
+      res.status(202).json({ document });
     } catch (err) {
       if (err instanceof z.ZodError) {
         return res.status(400).json({ error: 'Invalid request', details: err.flatten() });

@@ -73,7 +73,7 @@ app.get('/', (_req: Request, res: Response) => {
       'GET    /api/projects/:id                  — single project + its documents',
       'PATCH  /api/projects/:id                  — partial update of project fields',
       'DELETE /api/projects/:id                  — hard-delete (cascades to documents)',
-      'POST   /api/projects/:id/documents        — generate a document (proposal|tech_scope)',
+      'POST   /api/projects/:id/documents        — enqueue a document (returns 202 + pending row; AI runs in background)',
       'GET    /api/projects/documents/:id        — fetch a single document',
       'PATCH  /api/projects/documents/:id        — edit a document\'s body',
       'DELETE /api/projects/documents/:id        — hard-delete a single document version',

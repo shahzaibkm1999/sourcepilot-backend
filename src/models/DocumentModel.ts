@@ -3,9 +3,17 @@ import { Document, DocType } from '../types';
 
 /**
  * DocumentModel — Supabase queries for the `documents` table.
- * The post-refactor schema has columns: project_id, doc_type, content_markdown.
+ * The post-queue schema has columns: project_id, doc_type,
+ * content_markdown, status. `status` is one of 'pending' (AI call
+ * in flight), 'ready' (body is final), or 'failed' (AI call
+ * threw; `content_markdown` carries the error message).
  */
 export class DocumentModel {
+  /**
+   * Insert a row that's already in its final state. Used by the
+   * synchronous `DocumentModel.create` legacy path. For the queue
+   * flow, prefer `createPending` + `markReady`/`markFailed`.
+   */
   static async create(input: {
     projectId: string;
     docType: DocType;
@@ -17,12 +25,72 @@ export class DocumentModel {
         project_id: input.projectId,
         doc_type: input.docType,
         content_markdown: input.contentMarkdown,
+        status: 'ready',
       })
       .select('*')
       .single();
 
     if (error) throw new Error(`DocumentModel.create failed: ${error.message}`);
     return data;
+  }
+
+  /**
+   * Insert a `pending` row up front. The AI call hasn't started
+   * yet; `content_markdown` is a placeholder so the column is
+   * NOT NULL (the migration enforces NOT NULL on content_markdown).
+   * The orchestrator flips this row to `ready` or `failed` once
+   * the background work resolves.
+   */
+  static async createPending(input: {
+    projectId: string;
+    docType: DocType;
+  }): Promise<Document> {
+    const { data, error } = await supabase
+      .from('documents')
+      .insert({
+        project_id: input.projectId,
+        doc_type: input.docType,
+        content_markdown: '',
+        status: 'pending',
+      })
+      .select('*')
+      .single();
+
+    if (error) throw new Error(`DocumentModel.createPending failed: ${error.message}`);
+    return data;
+  }
+
+  /** Flip a pending row to ready and write the final body. */
+  static async markReady(id: string, contentMarkdown: string): Promise<Document | null> {
+    const { data, error } = await supabase
+      .from('documents')
+      .update({ content_markdown: contentMarkdown, status: 'ready' })
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new Error(`DocumentModel.markReady failed: ${error.message}`);
+    return data ?? null;
+  }
+
+  /**
+   * Flip a pending row to failed and write the error message into
+   * `content_markdown` (NOT NULL column). The frontend surfaces
+   * the error in the same viewer placeholder as a "failed" doc.
+   */
+  static async markFailed(id: string, errorMessage: string): Promise<Document | null> {
+    const { data, error } = await supabase
+      .from('documents')
+      .update({
+        content_markdown:
+          `# Generation failed\n\n${errorMessage}\n\n` +
+          `Click **Regenerate** in the project header to retry.`,
+        status: 'failed',
+      })
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new Error(`DocumentModel.markFailed failed: ${error.message}`);
+    return data ?? null;
   }
 
   static async listForProject(projectId: string): Promise<Document[]> {

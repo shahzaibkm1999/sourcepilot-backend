@@ -20,14 +20,18 @@ import { DocType, Document, Project } from '../types';
  * Post-refactor workflow entry point. The previous 8-stage
  * ProjectOrchestrator is gone; this is the only write path for
  * documents. Every document generation goes through
- * `generate(projectId, docType)`, which:
- *   1. Looks up the project (the only required input)
- *   2. Picks the right system prompt + user-prompt builder
- *   3. Calls DeepSeek, parses the JSON, validates with Zod
- *   4. Persists to `documents`
+ * `enqueue(projectId, docType)`, which:
+ *   1. Looks up the project
+ *   2. Inserts a row with `status = 'pending'` and returns it
+ *      immediately so the API call resolves in <100ms
+ *   3. Runs the DeepSeek call in the background (fire-and-forget
+ *      coroutine). On success, the row is updated to
+ *      `status = 'ready'` with the body. On failure, to
+ *      `status = 'failed'`.
  *
- * No lineage, no completeness, no intermediate stages. Just
- * intake → document.
+ * The frontend polls `GET /api/projects/:id` while any pending
+ * row exists, so the row flips from spinner to body without the
+ * user needing to refresh.
  */
 export class DocumentOrchestrator {
   private deepseek: DeepSeekService;
@@ -37,22 +41,68 @@ export class DocumentOrchestrator {
   }
 
   /**
-   * Generate a document for an existing project.
-   * Throws with a descriptive message if the project doesn't exist.
+   * Enqueue a document generation. Returns the pending row
+   * synchronously; the AI call continues in the background.
+   *
+   * The background work uses `.catch(...)` to swallow rejection
+   * (we already wrote `status='failed'` to the row) so the
+   * floating promise never becomes an unhandledRejection.
    */
-  async generate(projectId: string, docType: DocType): Promise<Document> {
+  async enqueue(projectId: string, docType: DocType): Promise<Document> {
     const project = await ProjectModel.findById(projectId);
     if (!project) {
-      throw new Error(`DocumentOrchestrator.generate: project ${projectId} not found`);
+      throw new Error(`DocumentOrchestrator.enqueue: project ${projectId} not found`);
     }
 
-    if (docType === 'proposal') {
-      return this.generateProposal(project);
-    }
-    return this.generateTechScope(project);
+    // 1. Insert the pending row up front.
+    const pending = await DocumentModel.createPending({
+      projectId: project.id,
+      docType,
+    });
+
+    // 2. Fire the AI call in the background.
+    void this.runInBackground(pending.id, project, docType);
+
+    return pending;
   }
 
-  private async generateProposal(project: Project): Promise<Document> {
+  /**
+   * @deprecated Kept for compatibility with any synchronous caller
+   * (none in the current app, but tests / scripts may use it).
+   * New code should call `enqueue()` instead.
+   */
+  async generate(projectId: string, docType: DocType): Promise<Document> {
+    return this.enqueue(projectId, docType);
+  }
+
+  private async runInBackground(
+    documentId: string,
+    project: Project,
+    docType: DocType,
+  ): Promise<void> {
+    try {
+      const markdown =
+        docType === 'proposal'
+          ? await this.generateProposalBody(project)
+          : await this.generateTechScopeBody(project);
+      await DocumentModel.markReady(documentId, markdown);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Unknown generation error';
+      // eslint-disable-next-line no-console
+      console.error(`[orchestrator] doc ${documentId} failed: ${message}`);
+      try {
+        await DocumentModel.markFailed(documentId, message);
+      } catch (updateErr) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[orchestrator] could not mark doc ${documentId} as failed:`,
+          updateErr,
+        );
+      }
+    }
+  }
+
+  private async generateProposalBody(project: Project): Promise<string> {
     const userPrompt = buildProposalUserPrompt({ project });
     const { content } = await this.deepseek.chat({
       system: PROPOSAL_SYSTEM,
@@ -63,15 +113,10 @@ export class DocumentOrchestrator {
       maxOutputTokens: 4096,
     });
     const parsed = parseStageJson(content, ProposalSchema) as ProposalOutput;
-
-    return DocumentModel.create({
-      projectId: project.id,
-      docType: 'proposal',
-      contentMarkdown: parsed.content_markdown,
-    });
+    return parsed.content_markdown;
   }
 
-  private async generateTechScope(project: Project): Promise<Document> {
+  private async generateTechScopeBody(project: Project): Promise<string> {
     const userPrompt = buildTechScopeUserPrompt({ project });
     const { content } = await this.deepseek.chat({
       system: TECH_SCOPE_SYSTEM,
@@ -83,11 +128,6 @@ export class DocumentOrchestrator {
       maxOutputTokens: 6144,
     });
     const parsed = parseStageJson(content, TechScopeSchema) as TechScopeOutput;
-
-    return DocumentModel.create({
-      projectId: project.id,
-      docType: 'tech_scope',
-      contentMarkdown: parsed.content_markdown,
-    });
+    return parsed.content_markdown;
   }
 }
