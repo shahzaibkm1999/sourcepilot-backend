@@ -22,6 +22,7 @@ import { z } from 'zod';
 import { env } from '../config/env';
 import { ProjectModel } from '../models/ProjectModel';
 import { DocumentOrchestrator } from '../services/DocumentOrchestrator';
+import { queueReaper } from '../services/QueueReaper';
 
 // ---- Tool input schemas (Zod-validated at the MCP boundary) ----
 const CreateProjectInput = z.object({
@@ -80,8 +81,11 @@ const TOOLS = [
     name: 'generate_document',
     description:
       'Generate a document (proposal or tech_scope) for an existing ' +
-      'project. Returns the saved document row with the full markdown ' +
-      'content in `content_markdown`.',
+      'project. Blocks until the AI call finishes (typically 10-60s) ' +
+      'and returns the saved document row. On success the row has ' +
+      'status=ready and the full markdown body in `content_markdown`. ' +
+      'On failure the row has status=failed and `content_markdown` ' +
+      'carries the error message.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -125,7 +129,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'generate_document': {
         const { project_id, doc_type } = GenerateDocumentInput.parse(args);
-        const document = await new DocumentOrchestrator().generate(
+        // MCP has no polling channel — the tool result must contain
+        // the final body. `generateSync` awaits the AI call (with
+        // timeout + retry + concurrency cap from the orchestrator)
+        // and returns the ready/failed row.
+        const document = await new DocumentOrchestrator().generateSync(
           project_id,
           doc_type as 'proposal' | 'tech_scope',
         );
@@ -153,6 +161,9 @@ function errorResult(text: string) {
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // Start the same orphan-pending reaper the REST server runs.
+  // MCP is a separate process (`npm run mcp`) so it needs its own.
+  queueReaper.start();
   // eslint-disable-next-line no-console
   console.error(
     `[docforge-mcp] running on stdio (model=${env.DEEPSEEK_MODEL}, supabase=${env.SUPABASE_URL})`,
@@ -164,3 +175,13 @@ main().catch((err) => {
   console.error('[docforge-mcp] fatal:', err);
   process.exit(1);
 });
+
+/** Stop the reaper on shutdown so the process can exit cleanly. */
+function shutdown(signal: NodeJS.Signals): void {
+  // eslint-disable-next-line no-console
+  console.error(`[docforge-mcp] ${signal} received, shutting down…`);
+  queueReaper.stop();
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

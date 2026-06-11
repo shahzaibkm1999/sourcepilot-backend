@@ -155,4 +155,42 @@ export class DocumentModel {
     if (error) throw new Error(`DocumentModel.delete failed: ${error.message}`);
     return (count ?? 0) > 0;
   }
+
+  /**
+   * Reaper query — flip every `pending` row older than `maxAgeMs`
+   * to `failed`. Returns the number of rows reaped.
+   *
+   * This exists because the queue is in-process and fire-and-forget
+   * (see DocumentOrchestrator). If the Node process dies mid-AI-call,
+   * the pending row would otherwise sit `pending` forever and the
+   * frontend poller would spin indefinitely. The QueueReaper runs
+   * this every QUEUE_REAPER_INTERVAL_MS to clean up orphans.
+   *
+   * The cutoff is calculated server-side from `new Date()`. This is
+   * fine because the Supabase row's `created_at` is also server-side
+   * (defaults to now() in Postgres), so clock skew between
+   * application and DB is the only failure mode — not user-supplied.
+   */
+  static async markStalePendingAsFailed(maxAgeMs: number): Promise<number> {
+    const cutoffIso = new Date(Date.now() - maxAgeMs).toISOString();
+    const { data, error } = await supabase
+      .from('documents')
+      .update({
+        status: 'failed',
+        content_markdown:
+          '# Generation failed\n\n' +
+          'The server restarted while this document was being generated, ' +
+          'or the request timed out before completing.\n\n' +
+          'Click **Regenerate** in the project header to retry.',
+      })
+      .eq('status', 'pending')
+      .lt('created_at', cutoffIso)
+      .select('id');
+    if (error) {
+      throw new Error(
+        `DocumentModel.markStalePendingAsFailed failed: ${error.message}`,
+      );
+    }
+    return data?.length ?? 0;
+  }
 }
