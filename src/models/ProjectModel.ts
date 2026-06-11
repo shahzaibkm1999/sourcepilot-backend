@@ -1,36 +1,27 @@
 import { supabase } from '../config/supabase';
-import { Project } from '../types';
+import { Project, Audience } from '../types';
 
 /**
- * ProjectModel
- * -----------
- * All Supabase queries that touch the `projects` table live here.
- * Controllers never call Supabase directly.
+ * ProjectModel — Supabase queries for the `projects` table.
+ * The post-refactor schema has columns: name, client_name, audience,
+ * project_type, raw_requirement.
  */
 export class ProjectModel {
-  /**
-   * Find a project by its (unique) name. Returns null if missing.
-   */
-  static async findByName(name: string): Promise<Project | null> {
-    const { data, error } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('name', name)
-      .maybeSingle();
-
-    if (error) throw new Error(`ProjectModel.findByName failed: ${error.message}`);
-    return data ?? null;
-  }
-
-  /**
-   * Create a new project. Throws on duplicate name.
-   */
-  static async create(input: { name: string; description?: string }): Promise<Project> {
+  static async create(input: {
+    name: string;
+    client_name?: string;
+    audience: Audience;
+    project_type?: string;
+    raw_requirement: string;
+  }): Promise<Project> {
     const { data, error } = await supabase
       .from('projects')
       .insert({
         name: input.name,
-        description: input.description ?? null,
+        client_name: input.client_name ?? null,
+        audience: input.audience,
+        project_type: input.project_type ?? null,
+        raw_requirement: input.raw_requirement,
       })
       .select('*')
       .single();
@@ -39,25 +30,21 @@ export class ProjectModel {
     return data;
   }
 
-  /**
-   * Upsert by name - create if missing, otherwise return the existing row.
-   * Useful when the spec generator derives a project name from the idea.
-   */
-  static async upsertByName(input: { name: string; description?: string }): Promise<Project> {
-    const existing = await this.findByName(input.name);
-    if (existing) return existing;
-    return this.create(input);
+  static async findById(id: string): Promise<Project | null> {
+    const { data, error } = await supabase
+      .from('projects')
+      .select('*')
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`ProjectModel.findById failed: ${error.message}`);
+    return data ?? null;
   }
 
-  /**
-   * List every project, newest first.
-   */
   static async listAll(): Promise<Project[]> {
     const { data, error } = await supabase
       .from('projects')
       .select('*')
       .order('created_at', { ascending: false });
-
     if (error) throw new Error(`ProjectModel.listAll failed: ${error.message}`);
     return data ?? [];
   }
