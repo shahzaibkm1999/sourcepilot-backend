@@ -68,7 +68,7 @@ app.get('/', (_req: Request, res: Response) => {
       '`proposal` (non-technical client) and `tech_scope` (technical client).',
     endpoints: [
       'GET    /health',
-      'GET    /api/projects',
+      'GET    /api/projects?limit=&offset=         — paginated list, newest first (limit: 1-100, default 20)',
       'POST   /api/projects                       — capture a new project (intake)',
       'GET    /api/projects/:id                  — single project + its documents',
       'PATCH  /api/projects/:id                  — partial update of project fields',

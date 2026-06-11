@@ -40,13 +40,27 @@ export class ProjectModel {
     return data ?? null;
   }
 
-  static async listAll(): Promise<Project[]> {
-    const { data, error } = await supabase
+  /**
+   * Paginated list, newest first. Returns the requested page of
+   * projects plus the total row count, so the caller can compute
+   * `hasMore` without a second query.
+   *
+   * `count: 'exact'` returns the full table count in the same
+   * response. `.range(start, end)` is inclusive on both ends per
+   * PostgREST; we want `[offset, offset + limit - 1]`.
+   */
+  static async listAll(opts: {
+    limit: number;
+    offset: number;
+  }): Promise<{ projects: Project[]; total: number }> {
+    const { limit, offset } = opts;
+    const { data, error, count } = await supabase
       .from('projects')
-      .select('*')
-      .order('created_at', { ascending: false });
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
     if (error) throw new Error(`ProjectModel.listAll failed: ${error.message}`);
-    return data ?? [];
+    return { projects: data ?? [], total: count ?? 0 };
   }
 
   /**

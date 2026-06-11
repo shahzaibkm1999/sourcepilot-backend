@@ -46,6 +46,16 @@ const generateDocSchema = z.object({
 });
 
 /**
+ * Query params for `GET /api/projects`. `limit` is clamped to
+ * `[1, 100]` to prevent abuse; `offset` must be `>= 0`. Express
+ * gives us string values; `z.coerce.number()` parses them.
+ */
+const listQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  offset: z.coerce.number().int().min(0).default(0),
+});
+
+/**
  * ProjectController
  * ---------------
  * The post-refactor surface. Three things a client can do:
@@ -71,12 +81,17 @@ export class ProjectController {
     }
   }
 
-  /** GET /api/projects — list every project, newest first */
-  static async list(_req: Request, res: Response, next: NextFunction) {
+  /** GET /api/projects — paginated list, newest first */
+  static async list(req: Request, res: Response, next: NextFunction) {
     try {
-      const projects = await ProjectModel.listAll();
-      res.json({ projects });
+      const { limit, offset } = listQuerySchema.parse(req.query);
+      const { projects, total } = await ProjectModel.listAll({ limit, offset });
+      const hasMore = offset + projects.length < total;
+      res.json({ projects, total, hasMore });
     } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ error: 'Invalid request', details: err.flatten() });
+      }
       next(err);
     }
   }
