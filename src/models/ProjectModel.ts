@@ -48,4 +48,47 @@ export class ProjectModel {
     if (error) throw new Error(`ProjectModel.listAll failed: ${error.message}`);
     return data ?? [];
   }
+
+  /**
+   * Partial-update a project. Only the keys present in `partial` are
+   * written; absent keys are left untouched. `null` for an optional
+   * field clears it.
+   *
+   * Returns the updated row, or `null` if no row with that id exists.
+   */
+  static async update(
+    id: string,
+    partial: {
+      name?: string;
+      client_name?: string | null;
+      audience?: 'non_tecnico' | 'tecnico';
+      project_type?: string | null;
+      raw_requirement?: string;
+    },
+  ): Promise<Project | null> {
+    const { data, error } = await supabase
+      .from('projects')
+      .update(partial)
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new Error(`ProjectModel.update failed: ${error.message}`);
+    return data ?? null;
+  }
+
+  /**
+   * Hard-delete a project. Document rows are removed by the
+   * `documents.project_id` FK's ON DELETE CASCADE constraint — we
+   * do not delete them from Node.
+   *
+   * Returns `true` if a row was deleted, `false` if no row matched.
+   */
+  static async delete(id: string): Promise<boolean> {
+    const { error, count } = await supabase
+      .from('projects')
+      .delete({ count: 'exact' })
+      .eq('id', id);
+    if (error) throw new Error(`ProjectModel.delete failed: ${error.message}`);
+    return (count ?? 0) > 0;
+  }
 }

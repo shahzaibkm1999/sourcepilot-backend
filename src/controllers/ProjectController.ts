@@ -13,6 +13,34 @@ const createSchema = z.object({
   raw_requirement: z.string().min(10).max(20_000),
 });
 
+/**
+ * PATCH body for a project. Every field is optional; absent keys
+ * are left untouched, `null` for a nullable field clears it.
+ * The refine() rejects empty bodies so a PATCH with `{}` returns
+ * 400 instead of a silent no-op.
+ */
+const updateProjectSchema = z
+  .object({
+    name: z.string().min(1).max(200).optional(),
+    client_name: z.string().max(200).nullable().optional(),
+    audience: z.enum(['non_tecnico', 'tecnico']).optional(),
+    project_type: z.string().max(100).nullable().optional(),
+    raw_requirement: z.string().min(10).max(20_000).optional(),
+  })
+  .refine((v) => Object.keys(v).length > 0, {
+    message: 'At least one field is required',
+  });
+
+/**
+ * PATCH body for a document. Only `content_markdown` is editable —
+ * `doc_type` and `project_id` are intentionally not in the schema
+ * (a version is forever a version of its type; a document belongs
+ * to the project it was generated for).
+ */
+const updateDocumentSchema = z.object({
+  content_markdown: z.string().min(1).max(50_000),
+});
+
 const generateDocSchema = z.object({
   doc_type: z.enum(['proposal', 'tech_scope']),
 });
@@ -96,6 +124,70 @@ export class ProjectController {
       const document = await DocumentModel.findById(id);
       if (!document) return res.status(404).json({ error: `Document ${id} not found` });
       res.json({ document });
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** PATCH /api/projects/:id — partial update of project fields */
+  static async update(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      if (!id) return res.status(400).json({ error: 'Project id is required' });
+
+      const partial = updateProjectSchema.parse(req.body);
+      const project = await ProjectModel.update(id, partial);
+      if (!project) return res.status(404).json({ error: `Project ${id} not found` });
+      res.json({ project });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ error: 'Invalid request', details: err.flatten() });
+      }
+      next(err);
+    }
+  }
+
+  /** DELETE /api/projects/:id — hard-delete (cascades to documents) */
+  static async deleteProject(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      if (!id) return res.status(400).json({ error: 'Project id is required' });
+
+      const deleted = await ProjectModel.delete(id);
+      if (!deleted) return res.status(404).json({ error: `Project ${id} not found` });
+      res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  }
+
+  /** PATCH /api/projects/documents/:id — edit a document's body */
+  static async updateDocument(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      if (!id) return res.status(400).json({ error: 'Document id is required' });
+
+      const { content_markdown } = updateDocumentSchema.parse(req.body);
+      const document = await DocumentModel.update(id, content_markdown);
+      if (!document) return res.status(404).json({ error: `Document ${id} not found` });
+      res.json({ document });
+    } catch (err) {
+      if (err instanceof z.ZodError) {
+        return res.status(400).json({ error: 'Invalid request', details: err.flatten() });
+      }
+      next(err);
+    }
+  }
+
+  /** DELETE /api/projects/documents/:id — hard-delete a single version */
+  static async deleteDocument(req: Request, res: Response, next: NextFunction) {
+    try {
+      const { id } = req.params;
+      if (!id) return res.status(400).json({ error: 'Document id is required' });
+
+      const deleted = await DocumentModel.delete(id);
+      if (!deleted) return res.status(404).json({ error: `Document ${id} not found` });
+      res.status(204).send();
     } catch (err) {
       next(err);
     }
