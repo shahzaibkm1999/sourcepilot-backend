@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 /**
- * AI Software Planning Assistant MCP Server
- * ========================================
- * Exposes four tools to MCP-compatible clients (Claude Desktop, Claude Code, etc.):
+ * docforge MCP Server
+ * ==================
+ * Post-refactor MCP surface. Two tools:
  *
- *   - create_spec  : Generate a spec from an idea (calls Gemini + saves to Supabase)
- *   - save_spec    : Save an already-generated spec to Supabase
- *   - get_spec     : Retrieve the latest spec for a project by name
- *   - list_specs   : List every saved spec, newest first
+ *   - create_project   : Capture a new project (intake)
+ *   - generate_document : Generate a document for an existing project
  *
- * Transport: stdio (one JSON-RPC message per line, per the MCP spec).
+ * The old 20-tool SourcePilot pipeline is gone. This is the whole
+ * product. Transport: stdio (one JSON-RPC message per line).
  * Run with:  npm run mcp
  */
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -21,93 +20,95 @@ import {
 import { z } from 'zod';
 
 import { env } from '../config/env';
-import { SupabaseService } from '../services/SupabaseService';
-import { SpecificationGenerator } from '../services/SpecificationGenerator';
+import { ProjectModel } from '../models/ProjectModel';
+import { DocumentOrchestrator } from '../services/DocumentOrchestrator';
+import { queueReaper } from '../services/QueueReaper';
 
-// ---- Tool input schemas (validated with zod) ----
-const CreateSpecInput = z.object({
-  projectIdea: z.string().min(3).describe('A one-line description of the project idea.'),
+// ---- Tool input schemas (Zod-validated at the MCP boundary) ----
+const CreateProjectInput = z.object({
+  name: z.string().min(1).max(200).describe('Project / engagement name.'),
+  client_name: z.string().max(200).optional().describe('Optional client name.'),
+  audience: z.enum(['non_tecnico', 'tecnico']).describe(
+    'non_tecnico = Airtable-style proposal. ' +
+      'tecnico = Orbit-style technical scope document.',
+  ),
+  project_type: z.string().max(100).optional().describe(
+    'e.g. "web", "mobile", "api", "internal-tool".',
+  ),
+  raw_requirement: z.string().min(10).max(20_000).describe(
+    'The client\'s verbatim request (1-2 paragraphs minimum).',
+  ),
 });
 
-const SaveSpecInput = z.object({
-  projectName: z.string().min(1).describe('Unique project name (used as the key in the projects table).'),
-  projectDescription: z.string().optional().describe('Optional one-sentence description of the project.'),
-  specificationContent: z
-    .string()
-    .min(10)
-    .describe('The full Markdown specification content to save.'),
-});
-
-const GetSpecInput = z.object({
-  projectName: z.string().min(1).describe('The project name whose spec you want to retrieve.'),
+const GenerateDocumentInput = z.object({
+  project_id: z.string().uuid().describe('The project UUID.'),
+  doc_type: z.enum(['proposal', 'tech_scope']).describe(
+    'Which template to generate. proposal = Airtable-style. ' +
+      'tech_scope = Orbit-style.',
+  ),
 });
 
 // ---- Tool definitions for the MCP client ----
 const TOOLS = [
   {
-    name: 'create_spec',
+    name: 'create_project',
     description:
-      'Generate a full software specification from a one-line project idea using Google Gemini, then save it to Supabase. Returns the saved spec.',
+      'Capture a new client project (intake). Returns the project row ' +
+      'with its UUID. Use this first; then call generate_document ' +
+      'with that UUID.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectIdea: {
+        name: { type: 'string', description: 'Project / engagement name.' },
+        client_name: { type: 'string', description: 'Optional client name.' },
+        audience: {
           type: 'string',
-          description: 'A one-line description of the project idea.',
+          enum: ['non_tecnico', 'tecnico'],
+          description:
+            'non_tecnico = Airtable-style proposal. ' +
+            'tecnico = Orbit-style technical scope document.',
+        },
+        project_type: { type: 'string', description: 'e.g. web, mobile, api.' },
+        raw_requirement: {
+          type: 'string',
+          description: 'The client\'s verbatim request (1-2 paragraphs min).',
         },
       },
-      required: ['projectIdea'],
+      required: ['name', 'audience', 'raw_requirement'],
     },
   },
   {
-    name: 'save_spec',
+    name: 'generate_document',
     description:
-      'Save an already-generated specification to Supabase. Creates the project if it does not exist; otherwise inserts a new versioned row.',
+      'Generate a document (proposal or tech_scope) for an existing ' +
+      'project. Blocks until the AI call finishes (typically 10-60s) ' +
+      'and returns the saved document row. On success the row has ' +
+      'status=ready and the full markdown body in `content_markdown`. ' +
+      'On failure the row has status=failed and `content_markdown` ' +
+      'carries the error message.',
     inputSchema: {
       type: 'object',
       properties: {
-        projectName: { type: 'string', description: 'Unique project name.' },
-        projectDescription: { type: 'string', description: 'Optional project description.' },
-        specificationContent: {
+        project_id: { type: 'string', description: 'The project UUID.' },
+        doc_type: {
           type: 'string',
-          description: 'Full Markdown specification content.',
+          enum: ['proposal', 'tech_scope'],
+          description: 'Which template to generate.',
         },
       },
-      required: ['projectName', 'specificationContent'],
-    },
-  },
-  {
-    name: 'get_spec',
-    description:
-      'Retrieve the latest saved specification for a project, looked up by project name.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        projectName: { type: 'string', description: 'The project name to look up.' },
-      },
-      required: ['projectName'],
-    },
-  },
-  {
-    name: 'list_specs',
-    description: 'List every saved specification, newest first, joined with project metadata.',
-    inputSchema: {
-      type: 'object',
-      properties: {},
+      required: ['project_id', 'doc_type'],
     },
   },
 ] as const;
 
-// ---- The server itself ----
+// ---- Server itself ----
 const server = new Server(
   {
-    name: 'ai-software-planning-assistant-mcp',
-    version: '0.1.0',
+    name: 'docforge-mcp',
+    version: '0.2.0',
   },
   {
-    capabilities: {
-      tools: {},
-    },
+    capabilities: { tools: {} },
   },
 );
 
@@ -120,36 +121,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   try {
     switch (name) {
-      case 'create_spec': {
-        const { projectIdea } = CreateSpecInput.parse(args);
-        const { saved } = await new SpecificationGenerator().createAndSave(projectIdea);
-        return textResult(JSON.stringify(saved, null, 2));
+      case 'create_project': {
+        const input = CreateProjectInput.parse(args);
+        const project = await ProjectModel.create(input);
+        return textResult(JSON.stringify({ project }, null, 2));
       }
 
-      case 'save_spec': {
-        const { projectName, projectDescription, specificationContent } = SaveSpecInput.parse(args);
-        const { project, specification } = await SupabaseService.saveSpec({
-          projectName,
-          projectDescription,
-          content: specificationContent,
-        });
-        return textResult(
-          JSON.stringify({ project, specification }, null, 2),
+      case 'generate_document': {
+        const { project_id, doc_type } = GenerateDocumentInput.parse(args);
+        // MCP has no polling channel — the tool result must contain
+        // the final body. `generateSync` awaits the AI call (with
+        // timeout + retry + concurrency cap from the orchestrator)
+        // and returns the ready/failed row.
+        const document = await new DocumentOrchestrator().generateSync(
+          project_id,
+          doc_type as 'proposal' | 'tech_scope',
         );
-      }
-
-      case 'get_spec': {
-        const { projectName } = GetSpecInput.parse(args);
-        const spec = await SupabaseService.getSpec(projectName);
-        if (!spec) {
-          return textResult(`No specification found for project "${projectName}".`);
-        }
-        return textResult(JSON.stringify(spec, null, 2));
-      }
-
-      case 'list_specs': {
-        const specs = await SupabaseService.listSpecs();
-        return textResult(JSON.stringify(specs, null, 2));
+        return textResult(JSON.stringify({ document }, null, 2));
       }
 
       default:
@@ -162,32 +150,38 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 });
 
 function textResult(text: string) {
-  return {
-    content: [{ type: 'text' as const, text }],
-  };
+  return { content: [{ type: 'text' as const, text }] };
 }
 
 function errorResult(text: string) {
-  return {
-    isError: true,
-    content: [{ type: 'text' as const, text }],
-  };
+  return { isError: true, content: [{ type: 'text' as const, text }] };
 }
 
 // ---- Boot ----
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-
-  // Log to stderr so we never corrupt the JSON-RPC stream on stdout.
+  // Start the same orphan-pending reaper the REST server runs.
+  // MCP is a separate process (`npm run mcp`) so it needs its own.
+  queueReaper.start();
   // eslint-disable-next-line no-console
   console.error(
-    `[ai-software-planning-assistant-mcp] running on stdio (model=${env.GEMINI_MODEL}, supabase=${env.SUPABASE_URL})`,
+    `[docforge-mcp] running on stdio (model=${env.DEEPSEEK_MODEL}, supabase=${env.SUPABASE_URL})`,
   );
 }
 
 main().catch((err) => {
   // eslint-disable-next-line no-console
-  console.error('[ai-software-planning-assistant-mcp] fatal:', err);
+  console.error('[docforge-mcp] fatal:', err);
   process.exit(1);
 });
+
+/** Stop the reaper on shutdown so the process can exit cleanly. */
+function shutdown(signal: NodeJS.Signals): void {
+  // eslint-disable-next-line no-console
+  console.error(`[docforge-mcp] ${signal} received, shutting down…`);
+  queueReaper.stop();
+  process.exit(0);
+}
+process.on('SIGTERM', shutdown);
+process.on('SIGINT', shutdown);

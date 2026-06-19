@@ -1,36 +1,27 @@
 import { supabase } from '../config/supabase';
-import { Project } from '../types';
+import { Project, Audience } from '../types';
 
 /**
- * ProjectModel
- * -----------
- * All Supabase queries that touch the `projects` table live here.
- * Controllers never call Supabase directly.
+ * ProjectModel — Supabase queries for the `projects` table.
+ * The post-refactor schema has columns: name, client_name, audience,
+ * project_type, raw_requirement.
  */
 export class ProjectModel {
-  /**
-   * Find a project by its (unique) name. Returns null if missing.
-   */
-  static async findByName(name: string): Promise<Project | null> {
-    const { data, error } = await supabase
-      .from('projects')
-      .select('*')
-      .eq('name', name)
-      .maybeSingle();
-
-    if (error) throw new Error(`ProjectModel.findByName failed: ${error.message}`);
-    return data ?? null;
-  }
-
-  /**
-   * Create a new project. Throws on duplicate name.
-   */
-  static async create(input: { name: string; description?: string }): Promise<Project> {
+  static async create(input: {
+    name: string;
+    client_name?: string;
+    audience: Audience;
+    project_type?: string;
+    raw_requirement: string;
+  }): Promise<Project> {
     const { data, error } = await supabase
       .from('projects')
       .insert({
         name: input.name,
-        description: input.description ?? null,
+        client_name: input.client_name ?? null,
+        audience: input.audience,
+        project_type: input.project_type ?? null,
+        raw_requirement: input.raw_requirement,
       })
       .select('*')
       .single();
@@ -39,26 +30,79 @@ export class ProjectModel {
     return data;
   }
 
-  /**
-   * Upsert by name - create if missing, otherwise return the existing row.
-   * Useful when the spec generator derives a project name from the idea.
-   */
-  static async upsertByName(input: { name: string; description?: string }): Promise<Project> {
-    const existing = await this.findByName(input.name);
-    if (existing) return existing;
-    return this.create(input);
-  }
-
-  /**
-   * List every project, newest first.
-   */
-  static async listAll(): Promise<Project[]> {
+  static async findById(id: string): Promise<Project | null> {
     const { data, error } = await supabase
       .from('projects')
       .select('*')
-      .order('created_at', { ascending: false });
+      .eq('id', id)
+      .maybeSingle();
+    if (error) throw new Error(`ProjectModel.findById failed: ${error.message}`);
+    return data ?? null;
+  }
 
+  /**
+   * Paginated list, newest first. Returns the requested page of
+   * projects plus the total row count, so the caller can compute
+   * `hasMore` without a second query.
+   *
+   * `count: 'exact'` returns the full table count in the same
+   * response. `.range(start, end)` is inclusive on both ends per
+   * PostgREST; we want `[offset, offset + limit - 1]`.
+   */
+  static async listAll(opts: {
+    limit: number;
+    offset: number;
+  }): Promise<{ projects: Project[]; total: number }> {
+    const { limit, offset } = opts;
+    const { data, error, count } = await supabase
+      .from('projects')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(offset, offset + limit - 1);
     if (error) throw new Error(`ProjectModel.listAll failed: ${error.message}`);
-    return data ?? [];
+    return { projects: data ?? [], total: count ?? 0 };
+  }
+
+  /**
+   * Partial-update a project. Only the keys present in `partial` are
+   * written; absent keys are left untouched. `null` for an optional
+   * field clears it.
+   *
+   * Returns the updated row, or `null` if no row with that id exists.
+   */
+  static async update(
+    id: string,
+    partial: {
+      name?: string;
+      client_name?: string | null;
+      audience?: 'non_tecnico' | 'tecnico';
+      project_type?: string | null;
+      raw_requirement?: string;
+    },
+  ): Promise<Project | null> {
+    const { data, error } = await supabase
+      .from('projects')
+      .update(partial)
+      .eq('id', id)
+      .select('*')
+      .maybeSingle();
+    if (error) throw new Error(`ProjectModel.update failed: ${error.message}`);
+    return data ?? null;
+  }
+
+  /**
+   * Hard-delete a project. Document rows are removed by the
+   * `documents.project_id` FK's ON DELETE CASCADE constraint — we
+   * do not delete them from Node.
+   *
+   * Returns `true` if a row was deleted, `false` if no row matched.
+   */
+  static async delete(id: string): Promise<boolean> {
+    const { error, count } = await supabase
+      .from('projects')
+      .delete({ count: 'exact' })
+      .eq('id', id);
+    if (error) throw new Error(`ProjectModel.delete failed: ${error.message}`);
+    return (count ?? 0) > 0;
   }
 }

@@ -1,37 +1,40 @@
 /**
- * Shared domain types for the AI Software Planning Assistant backend.
- * Kept thin on purpose - they mirror the Supabase schema.
+ * SourcePilot — minimal doc-generator domain types.
+ *
+ * After the refactor (Jan 2026), the pipeline collapsed from 8 stages
+ * to 1: capture the client request, generate a document.
+ * The schema shrank to two tables: `projects` + `documents`.
  */
+
+export type Audience = 'non_tecnico' | 'tecnico';
+export type DocType = 'proposal' | 'tech_scope';
+export type DocumentStatus = 'pending' | 'ready' | 'failed';
 
 export interface Project {
   id: string;
   name: string;
-  description: string | null;
+  client_name: string | null;
+  audience: Audience;
+  project_type: string | null;
+  raw_requirement: string;
   created_at: string;
 }
 
-export interface Specification {
+export interface Document {
   id: string;
   project_id: string;
-  content: string;
-  version: number;
+  doc_type: DocType;
+  content_markdown: string;
   created_at: string;
+  /**
+   * Queue state. `pending` = AI call in flight. `ready` = body is
+   * final. `failed` = AI call threw; `content_markdown` contains
+   * the error message so the UI can display it.
+   */
+  status: DocumentStatus;
 }
 
-/**
- * The shape returned to clients when they ask for a spec
- * with its parent project joined in.
- */
-export interface SpecificationWithProject extends Specification {
-  project: Pick<Project, 'id' | 'name' | 'description'>;
-}
-
-/**
- * What the Gemini service produces. Stored verbatim in
- * `specifications.content`.
- */
-export interface GeneratedSpec {
-  projectName: string;
-  projectDescription: string;
-  content: string;
+/** A project bundled with all its documents (joined on the server). */
+export interface ProjectWithDocuments extends Project {
+  documents: Document[];
 }
